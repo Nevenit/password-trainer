@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 import hashlib
-import getpass
-import random
 import os
 import json
 import time
+import random
+import tkinter as tk
+from tkinter import messagebox
 
 STORE_FILE = os.path.expanduser("~/.password_trainer.json")
 TIMES_DIR = os.path.expanduser("~/.password_trainer_times")
@@ -38,127 +39,278 @@ def log_time(label, elapsed, correct):
             f.write("timestamp,elapsed,correct\n")
         f.write(f"{time.time()},{elapsed:.4f},{int(correct)}\n")
 
-def add_passwords(store):
-    print("\n--- Add Passwords ---")
-    print("Give each password a label (e.g. 'laptop', 'server').")
-    print("Enter a blank label when done.\n")
 
-    while True:
-        label = input("Label: ").strip()
+class PasswordTrainer:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Password Trainer")
+        self.root.resizable(False, False)
+        self.store = load_store()
+        self.timer_start = None
+        self.current_label = None
+        self.session_correct = 0
+        self.session_total = 0
+        self._timer_id = None
+        self.last_result_text = ""
+        self.last_result_color = "#888"
+
+        self.frame = tk.Frame(root, padx=20, pady=20)
+        self.frame.pack()
+
+        self.show_menu()
+
+    def clear(self):
+        if self._timer_id:
+            self.root.after_cancel(self._timer_id)
+            self._timer_id = None
+        for w in self.frame.winfo_children():
+            w.destroy()
+
+    def pick_random_label(self):
+        labels = list(self.store.keys())
+        if len(labels) == 1:
+            return labels[0]
+        choices = [l for l in labels if l != self.current_label] or labels
+        return random.choice(choices)
+
+    # ---- MENU ----
+
+    def show_menu(self):
+        self.clear()
+        self.session_correct = 0
+        self.session_total = 0
+        self.last_result_text = ""
+
+        tk.Label(self.frame, text="Password Trainer", font=("Helvetica", 18, "bold")).pack(pady=(0, 5))
+        tk.Label(self.frame, text=f"{len(self.store)} password(s) stored", font=("Helvetica", 11), fg="#666").pack(pady=(0, 15))
+
+        btn_opts = dict(width=20, font=("Helvetica", 12), pady=5)
+        tk.Button(self.frame, text="Add Password", command=self.show_add, **btn_opts).pack(pady=3)
+        tk.Button(self.frame, text="Practice", command=self.show_practice, **btn_opts).pack(pady=3)
+        tk.Button(self.frame, text="Stats", command=self.show_stats, **btn_opts).pack(pady=3)
+        tk.Button(self.frame, text="Reset All", command=self.reset_all, **btn_opts).pack(pady=3)
+
+    # ---- ADD PASSWORD ----
+
+    def show_add(self):
+        self.clear()
+        tk.Label(self.frame, text="Add Password", font=("Helvetica", 16, "bold")).pack(pady=(0, 15))
+
+        tk.Label(self.frame, text="Label (e.g. 'laptop', 'server'):", anchor="w").pack(fill="x")
+        self.add_label_entry = tk.Entry(self.frame, font=("Helvetica", 12), width=30)
+        self.add_label_entry.pack(pady=(0, 10))
+        self.add_label_entry.focus_set()
+
+        tk.Label(self.frame, text="Password:", anchor="w").pack(fill="x")
+        self.add_pw_entry = tk.Entry(self.frame, show="•", font=("Helvetica", 12), width=30)
+        self.add_pw_entry.pack(pady=(0, 10))
+
+        tk.Label(self.frame, text="Confirm password:", anchor="w").pack(fill="x")
+        self.add_pw2_entry = tk.Entry(self.frame, show="•", font=("Helvetica", 12), width=30)
+        self.add_pw2_entry.pack(pady=(0, 10))
+
+        self.add_msg = tk.Label(self.frame, text="", fg="red", font=("Helvetica", 10))
+        self.add_msg.pack()
+
+        btn_frame = tk.Frame(self.frame)
+        btn_frame.pack(pady=10)
+        tk.Button(btn_frame, text="Save", command=self.do_add, width=10, font=("Helvetica", 11)).pack(side="left", padx=5)
+        tk.Button(btn_frame, text="Back", command=self.show_menu, width=10, font=("Helvetica", 11)).pack(side="left", padx=5)
+
+        self.add_pw2_entry.bind("<Return>", lambda e: self.do_add())
+
+    def do_add(self):
+        label = self.add_label_entry.get().strip()
+        pw = self.add_pw_entry.get()
+        pw2 = self.add_pw2_entry.get()
+
         if not label:
-            break
-        pw = getpass.getpass(f"Password for '{label}': ")
-        pw2 = getpass.getpass(f"Confirm '{label}': ")
+            self.add_msg.config(text="Enter a label.")
+            return
+        if not pw:
+            self.add_msg.config(text="Enter a password.")
+            return
         if pw != pw2:
-            print("Passwords don't match, try again.\n")
-            continue
+            self.add_msg.config(text="Passwords don't match.")
+            self.add_pw_entry.delete(0, "end")
+            self.add_pw2_entry.delete(0, "end")
+            self.add_pw_entry.focus_set()
+            return
+
         salt, h = hash_password(pw)
-        store[label] = {"salt": salt, "hash": h, "streak": 0, "best_time": None}
-        print(f"Saved '{label}'.\n")
+        self.store[label] = {"salt": salt, "hash": h, "streak": 0, "best_time": None}
+        save_store(self.store)
+        self.add_msg.config(text=f"Saved '{label}'!", fg="green")
+        self.add_label_entry.delete(0, "end")
+        self.add_pw_entry.delete(0, "end")
+        self.add_pw2_entry.delete(0, "end")
+        self.add_label_entry.focus_set()
 
-    save_store(store)
-    return store
+    # ---- PRACTICE ----
 
-def practice(store):
-    if not store:
-        print("No passwords stored. Add some first.\n")
-        return
+    def show_practice(self):
+        if not self.store:
+            messagebox.showinfo("No passwords", "Add some passwords first.")
+            return
 
-    labels = list(store.keys())
-    correct = 0
-    total = 0
+        self.clear()
+        self.current_label = self.pick_random_label()
+        self.timer_start = None
 
-    print("\n--- Practice Mode ---")
-    print(f"Passwords: {', '.join(labels)}")
-    for label in labels:
-        best = store[label].get("best_time")
+        # Last result (persists from previous attempt)
+        self.result_label = tk.Label(self.frame, text=self.last_result_text,
+                                     font=("Helvetica", 12, "bold"), fg=self.last_result_color)
+        self.result_label.pack(pady=(0, 5))
+
+        session_text = f"Session: {self.session_correct}/{self.session_total}"
+        self.session_label = tk.Label(self.frame, text=session_text, font=("Helvetica", 10), fg="#666")
+        self.session_label.pack(pady=(0, 10))
+
+        self.prompt_label = tk.Label(self.frame, text=f"Type password for: {self.current_label}",
+                                     font=("Helvetica", 14))
+        self.prompt_label.pack(pady=(0, 5))
+
+        best = self.store[self.current_label].get("best_time")
+        streak = self.store[self.current_label].get("streak", 0)
+        info = f"Streak: {streak}"
         if best:
-            print(f"  {label}: PR {best:.2f}s")
-    print("Ctrl+C to stop.\n")
+            info += f"  |  PR: {best:.2f}s"
+        self.info_label = tk.Label(self.frame, text=info, font=("Helvetica", 10), fg="#888")
+        self.info_label.pack(pady=(0, 10))
 
-    try:
-        while True:
-            label = random.choice(labels)
+        self.pw_entry = tk.Entry(self.frame, show="•", font=("Helvetica", 14), width=30, justify="center")
+        self.pw_entry.pack(pady=(0, 5))
+        self.pw_entry.focus_set()
+        self.pw_entry.bind("<KeyPress>", self.on_first_key)
+        self.pw_entry.bind("<Return>", lambda e: self.check_password())
 
-            start = time.time()
-            attempt = getpass.getpass(f"Type password for '{label}': ")
-            elapsed = time.time() - start
+        self.timer_label = tk.Label(self.frame, text="", font=("Helvetica", 11, "bold"), fg="#888")
+        self.timer_label.pack()
 
-            salt = store[label]["salt"]
-            _, h = hash_password(attempt, salt)
-            total += 1
+        self.hint_label = tk.Label(self.frame, text="Timer starts when you type", font=("Helvetica", 9), fg="#aaa")
+        self.hint_label.pack()
 
-            if h == store[label]["hash"]:
-                store[label]["streak"] += 1
-                correct += 1
-                streak = store[label]["streak"]
-                best = store[label].get("best_time")
+        btn_frame = tk.Frame(self.frame)
+        btn_frame.pack(pady=10)
+        tk.Button(btn_frame, text="Submit", command=self.check_password, width=10, font=("Helvetica", 11)).pack(side="left", padx=5)
+        tk.Button(btn_frame, text="Menu", command=self.show_menu, width=10, font=("Helvetica", 11)).pack(side="left", padx=5)
 
-                if best is None or elapsed < best:
-                    if best is not None:
-                        print(f"  \u2713 {elapsed:.2f}s \u2014 \U0001f3c6 NEW PR! (was {best:.2f}s) (streak: {streak})\n")
-                    else:
-                        print(f"  \u2713 {elapsed:.2f}s \u2014 First time recorded! (streak: {streak})\n")
-                    store[label]["best_time"] = round(elapsed, 4)
+    def on_first_key(self, event):
+        if event.keysym in ("Shift_L", "Shift_R", "Control_L", "Control_R",
+                            "Alt_L", "Alt_R", "Meta_L", "Meta_R", "Caps_Lock",
+                            "Tab", "Return", "Escape"):
+            return
+        if self.timer_start is None:
+            self.timer_start = time.time()
+            self.hint_label.config(text="")
+            self.update_timer()
+
+    def update_timer(self):
+        if self.timer_start is not None:
+            elapsed = time.time() - self.timer_start
+            self.timer_label.config(text=f"{elapsed:.1f}s")
+            self._timer_id = self.root.after(50, self.update_timer)
+
+    def check_password(self):
+        if self.timer_start is None:
+            return
+
+        if self._timer_id:
+            self.root.after_cancel(self._timer_id)
+            self._timer_id = None
+
+        elapsed = time.time() - self.timer_start
+        attempt = self.pw_entry.get()
+        label = self.current_label
+
+        salt = self.store[label]["salt"]
+        _, h = hash_password(attempt, salt)
+        self.session_total += 1
+
+        if h == self.store[label]["hash"]:
+            self.store[label]["streak"] = self.store[label].get("streak", 0) + 1
+            self.session_correct += 1
+            streak = self.store[label]["streak"]
+            best = self.store[label].get("best_time")
+
+            if best is None or elapsed < best:
+                if best is not None:
+                    self.last_result_text = f"✓ {label}: {elapsed:.2f}s — 🏆 NEW PR! (was {best:.2f}s) streak:{streak}"
                 else:
-                    diff = elapsed - best
-                    print(f"  \u2713 {elapsed:.2f}s \u2014 +{diff:.2f}s off PR (streak: {streak})\n")
-
-                log_time(label, elapsed, True)
+                    self.last_result_text = f"✓ {label}: {elapsed:.2f}s — First time! streak:{streak}"
+                self.last_result_color = "green"
+                self.store[label]["best_time"] = round(elapsed, 4)
             else:
-                store[label]["streak"] = 0
-                print(f"  \u2717 Wrong. ({elapsed:.2f}s)\n")
-                log_time(label, elapsed, False)
+                diff = elapsed - best
+                self.last_result_text = f"✓ {label}: {elapsed:.2f}s — +{diff:.2f}s off PR  streak:{streak}"
+                self.last_result_color = "#2196F3"
 
-            save_store(store)
+            log_time(label, elapsed, True)
+        else:
+            self.store[label]["streak"] = 0
+            self.last_result_text = f"✗ {label}: Wrong ({elapsed:.2f}s)"
+            self.last_result_color = "red"
+            log_time(label, elapsed, False)
 
-    except KeyboardInterrupt:
-        print(f"\n\nSession: {correct}/{total}")
-        for label in labels:
-            best = store[label].get("best_time")
-            best_str = f", PR {best:.2f}s" if best else ""
-            print(f"  {label}: streak {store[label]['streak']}{best_str}")
-        print()
+        save_store(self.store)
+        self.show_practice()
 
-def reset_store(store):
-    confirm = input("Delete all stored passwords and times? (yes/no): ").strip().lower()
-    if confirm == "yes":
+    # ---- STATS ----
+
+    def show_stats(self):
+        if not self.store:
+            messagebox.showinfo("No passwords", "Add some passwords first.")
+            return
+
+        self.clear()
+        tk.Label(self.frame, text="Stats", font=("Helvetica", 16, "bold")).pack(pady=(0, 15))
+
+        for label in self.store:
+            entry = self.store[label]
+            streak = entry.get("streak", 0)
+            best = entry.get("best_time")
+
+            total_attempts = 0
+            correct_attempts = 0
+            times_file = get_times_file(label)
+            if os.path.exists(times_file):
+                with open(times_file) as f:
+                    lines = f.readlines()[1:]
+                    total_attempts = len(lines)
+                    correct_attempts = sum(1 for l in lines if l.strip().endswith(",1"))
+
+            row = tk.Frame(self.frame)
+            row.pack(fill="x", pady=5)
+
+            tk.Label(row, text=label, font=("Helvetica", 12, "bold"), anchor="w", width=15).pack(side="left")
+
+            details = f"Streak: {streak}"
+            if best:
+                details += f"  |  PR: {best:.2f}s"
+            if total_attempts:
+                pct = (correct_attempts / total_attempts) * 100
+                details += f"  |  {correct_attempts}/{total_attempts} ({pct:.0f}%)"
+
+            tk.Label(row, text=details, font=("Helvetica", 10), fg="#555", anchor="w").pack(side="left", padx=10)
+
+        tk.Label(self.frame, text=f"\nTime logs: {TIMES_DIR}/", font=("Helvetica", 9), fg="#aaa").pack(pady=(10, 0))
+        tk.Button(self.frame, text="Back", command=self.show_menu, width=10, font=("Helvetica", 11)).pack(pady=15)
+
+    # ---- RESET ----
+
+    def reset_all(self):
+        if not messagebox.askyesno("Reset", "Delete all stored passwords and times?"):
+            return
         if os.path.exists(STORE_FILE):
             os.remove(STORE_FILE)
         if os.path.exists(TIMES_DIR):
             import shutil
             shutil.rmtree(TIMES_DIR)
-        store.clear()
-        print("Cleared.\n")
-    return store
+        self.store.clear()
+        self.show_menu()
 
-def main():
-    store = load_store()
-
-    while True:
-        print("=== Password Trainer ===")
-        print(f"  {len(store)} password(s) stored")
-        if store:
-            print(f"  Times logged to: {TIMES_DIR}/")
-        print()
-        print("  1. Add passwords")
-        print("  2. Practice")
-        print("  3. Reset")
-        print("  4. Quit")
-        print()
-
-        choice = input("> ").strip()
-
-        if choice == "1":
-            store = add_passwords(store)
-        elif choice == "2":
-            practice(store)
-        elif choice == "3":
-            store = reset_store(store)
-        elif choice == "4":
-            break
-        else:
-            print()
 
 if __name__ == "__main__":
-    main()
+    root = tk.Tk()
+    app = PasswordTrainer(root)
+    root.mainloop()
